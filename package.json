@@ -1,15 +1,22 @@
 {
-  "name": "encore-ts-starter",
+  "name": "herc-seguranca-backend",
   "private": true,
-  "version": "0.0.1",
-  "description": "Encore Typescript Starter",
-  "license": "MPL-2.0",
+  "version": "1.0.0",
+  "description": "Backend para processamento de arquivos Excel com IA (OpenAI) - Encore",
+  "license": "ISC",
   "type": "module",
+  "scripts": {
+    "dev": "encore run",
+    "test": "encore test ./..."
+  },
   "devDependencies": {
-    "@types/node": "^20.5.7",
+    "@types/node": "^20.10.5",
     "typescript": "^5.2.2"
   },
   "dependencies": {
-    "encore.dev": "^1.51.5"
+    "encore.dev": "^1.51.5",
+    "openai": "^4.20.1",
+    "xlsx": "^0.18.5",
+    "zod": "^3.22.4"
   }
 }
