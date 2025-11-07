@@ -176,9 +176,23 @@ IMPORTANTE:
           try {
             console.log(`📡 Enviando lote ${i + 1}/${total}... (${slice.length} registros)`);
             const result = await processChunk(slice, i, total);
-            const chunkTime = ((Date.now() - chunkStartTime) / 1000).toFixed(2);
-            console.log(`✅ Lote ${i + 1}/${total} processado em ${chunkTime}s (${result.length} registros)`);
+            const chunkTime = (Date.now() - chunkStartTime) / 1000;
+            console.log(`✅ Lote ${i + 1}/${total} processado em ${chunkTime.toFixed(2)}s (${result.length} registros)`);
             processedData.push(...result);
+            
+            // Delay adaptativo entre chunks para respeitar rate limit da OpenAI
+            // Se ainda há mais chunks e o processamento foi rápido, adiciona delay
+            if (i < total - 1) {
+              const minTimePerChunk = 7; // 7s por chunk = ~8.5 req/min (abaixo de 500 RPM)
+              const timeElapsed = chunkTime;
+              
+              if (timeElapsed < minTimePerChunk) {
+                const delayNeeded = (minTimePerChunk - timeElapsed) * 1000;
+                console.log(`⏱️  Aguardando ${(delayNeeded / 1000).toFixed(1)}s antes do próximo lote...`);
+                await new Promise(r => setTimeout(r, delayNeeded));
+              }
+            }
+            
             break;
           } catch (e) {
             attempts++;
