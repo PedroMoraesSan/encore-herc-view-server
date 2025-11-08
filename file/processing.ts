@@ -1,5 +1,5 @@
 import { ExcelRow } from '../shared/types';
-import { processDataWithOpenAI, parseOpenAIResponse } from './openai';
+import { processDataWithGroq, parseGroqResponse } from './groq';
 import { createExcelFile } from './excel';
 
 /**
@@ -149,18 +149,20 @@ IMPORTANTE:
     const CHUNK_SIZE = 100;
     const needsChunking = data.length > CHUNK_SIZE;
     
-    // Configuração de rate limiting (ajuste conforme seu tier OpenAI)
+    // Configuração de rate limiting para Groq
+    // Groq é MUITO mais rápido e tem limites mais generosos!
+    // Free tier: 30 req/min, Paid: 6000 req/min
     const RATE_LIMIT_CONFIG = {
-      minTimePerChunk: 15, // 15s = ~4 req/min (muito conservador)
-      minDelayBetweenChunks: 3, // 3s mínimo sempre
-      maxRetries: 5, // Mais tentativas
-      baseRetryDelay: 10000, // 10s base para retry
+      minTimePerChunk: 2, // 2s = ~30 req/min (Groq é rápido!)
+      minDelayBetweenChunks: 1, // 1s mínimo
+      maxRetries: 3, // Menos tentativas necessárias
+      baseRetryDelay: 3000, // 3s base para retry
     };
 
     const processChunk = async (chunk: ExcelRow[], idx: number, total: number) => {
       const chunkPrompt = `${prompt}\n\nIMPORTANTE: Você está processando o LOTE ${idx + 1} de ${total}. Retorne SOMENTE os eventos deste lote.`;
-      const response = await processDataWithOpenAI(chunk, chunkPrompt);
-      const parsed = parseOpenAIResponse(response);
+      const response = await processDataWithGroq(chunk, chunkPrompt);
+      const parsed = parseGroqResponse(response);
       return Array.isArray(parsed) ? parsed : [];
     };
 
@@ -227,16 +229,16 @@ IMPORTANTE:
       console.log(`✅ Todos os lotes concluídos em ${totalTime}s. Total acumulado: ${processedData.length}`);
     } else {
       // Arquivo pequeno (< 100 registros) - mas ainda precisa de retry para rate limit
-      console.log('📡 Enviando dados para processamento com OpenAI...');
+      console.log('📡 Enviando dados para processamento com Groq...');
       
       let attempts = 0;
       
       while (true) {
         try {
-          const openaiResponse = await processDataWithOpenAI(data, prompt);
+          const groqResponse = await processDataWithGroq(data, prompt);
           const processTime = ((Date.now() - processStartTime) / 1000).toFixed(2);
-          console.log(`✅ Resposta recebida do OpenAI em ${processTime}s`);
-          processedData = parseOpenAIResponse(openaiResponse);
+          console.log(`✅ Resposta recebida do Groq em ${processTime}s`);
+          processedData = parseGroqResponse(groqResponse);
           break;
         } catch (e) {
           attempts++;

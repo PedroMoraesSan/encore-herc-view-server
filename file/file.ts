@@ -118,7 +118,7 @@ export const upload = api(
           fileSize: fileSize,
           recordsCount: rawData.length,
           customPrompt: req.prompt,
-          modelUsed: 'gpt-4o',
+          modelUsed: 'llama-3.3-70b-versatile',
         });
       } catch (dbError) {
         console.warn('⚠️  Não foi possível salvar histórico no banco:', dbError);
@@ -157,7 +157,7 @@ export const upload = api(
       }
 
       // Convert buffer to base64 for response
-      const base64Data = excelBuffer.toString('base64');
+      const base64Data = Buffer.from(excelBuffer).toString('base64');
       
       return {
         data: base64Data,

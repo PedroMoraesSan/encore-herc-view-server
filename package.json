@@ -2,7 +2,7 @@
   "name": "herc-seguranca-backend",
   "private": true,
   "version": "1.0.0",
-  "description": "Backend para processamento de arquivos Excel com IA (OpenAI) - Encore",
+  "description": "Backend para processamento de arquivos Excel com IA (Groq + Llama 3.3) - Encore",
   "license": "ISC",
   "type": "module",
   "scripts": {
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "encore.dev": "^1.51.5",
+    "groq-sdk": "^0.34.0",
     "openai": "^4.20.1",
     "xlsx": "^0.18.5",
     "zod": "^3.22.4"
