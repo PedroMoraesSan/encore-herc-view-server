@@ -181,15 +181,19 @@ IMPORTANTE:
             processedData.push(...result);
             
             // Delay adaptativo entre chunks para respeitar rate limit da OpenAI
-            // Se ainda há mais chunks e o processamento foi rápido, adiciona delay
+            // Se ainda há mais chunks, adiciona delay
             if (i < total - 1) {
-              const minTimePerChunk = 7; // 7s por chunk = ~8.5 req/min (abaixo de 500 RPM)
+              const minTimePerChunk = 10; // 10s por chunk = ~6 req/min (mais conservador)
               const timeElapsed = chunkTime;
               
               if (timeElapsed < minTimePerChunk) {
                 const delayNeeded = (minTimePerChunk - timeElapsed) * 1000;
                 console.log(`⏱️  Aguardando ${(delayNeeded / 1000).toFixed(1)}s antes do próximo lote...`);
                 await new Promise(r => setTimeout(r, delayNeeded));
+              } else {
+                // Mesmo se o chunk demorou mais, adiciona um delay mínimo
+                console.log(`⏱️  Aguardando 2s antes do próximo lote...`);
+                await new Promise(r => setTimeout(r, 2000));
               }
             }
             
@@ -200,8 +204,9 @@ IMPORTANTE:
             if (attempts >= maxAttempts || !/429|rate limit|too large|TPM/i.test(msg)) {
               throw e;
             }
-            const delay = 1500 * Math.pow(2, attempts - 1);
-            console.warn(`⚠️  Lote ${i + 1}/${total} falhou (${msg}). Retentando em ${delay}ms...`);
+            // Backoff exponencial mais agressivo para rate limit
+            const delay = 5000 * Math.pow(2, attempts - 1); // 5s, 10s, 20s
+            console.warn(`⚠️  Lote ${i + 1}/${total} falhou (rate limit). Retentando em ${(delay/1000).toFixed(0)}s...`);
             await new Promise(r => setTimeout(r, delay));
           }
         }
@@ -210,11 +215,31 @@ IMPORTANTE:
       const totalTime = ((Date.now() - processStartTime) / 1000).toFixed(2);
       console.log(`✅ Todos os lotes concluídos em ${totalTime}s. Total acumulado: ${processedData.length}`);
     } else {
+      // Arquivo pequeno (< 100 registros) - mas ainda precisa de retry para rate limit
       console.log('📡 Enviando dados para processamento com OpenAI...');
-      const openaiResponse = await processDataWithOpenAI(data, prompt);
-      const processTime = ((Date.now() - processStartTime) / 1000).toFixed(2);
-      console.log(`✅ Resposta recebida do OpenAI em ${processTime}s`);
-      processedData = parseOpenAIResponse(openaiResponse);
+      
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      while (true) {
+        try {
+          const openaiResponse = await processDataWithOpenAI(data, prompt);
+          const processTime = ((Date.now() - processStartTime) / 1000).toFixed(2);
+          console.log(`✅ Resposta recebida do OpenAI em ${processTime}s`);
+          processedData = parseOpenAIResponse(openaiResponse);
+          break;
+        } catch (e) {
+          attempts++;
+          const msg = e instanceof Error ? e.message : String(e);
+          if (attempts >= maxAttempts || !/429|rate limit|too large|TPM/i.test(msg)) {
+            throw e;
+          }
+          // Backoff exponencial para rate limit
+          const delay = 5000 * Math.pow(2, attempts - 1); // 5s, 10s, 20s
+          console.warn(`⚠️ Processamento falhou (rate limit). Retentando em ${(delay/1000).toFixed(0)}s...`);
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
     }
 
     // Normalização pós-processamento
