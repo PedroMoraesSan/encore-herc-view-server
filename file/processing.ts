@@ -148,6 +148,14 @@ IMPORTANTE:
     const prompt = customPrompt || defaultPrompt;
     const CHUNK_SIZE = 100;
     const needsChunking = data.length > CHUNK_SIZE;
+    
+    // Configuração de rate limiting (ajuste conforme seu tier OpenAI)
+    const RATE_LIMIT_CONFIG = {
+      minTimePerChunk: 15, // 15s = ~4 req/min (muito conservador)
+      minDelayBetweenChunks: 3, // 3s mínimo sempre
+      maxRetries: 5, // Mais tentativas
+      baseRetryDelay: 10000, // 10s base para retry
+    };
 
     const processChunk = async (chunk: ExcelRow[], idx: number, total: number) => {
       const chunkPrompt = `${prompt}\n\nIMPORTANTE: Você está processando o LOTE ${idx + 1} de ${total}. Retorne SOMENTE os eventos deste lote.`;
@@ -170,7 +178,6 @@ IMPORTANTE:
         const slice = data.slice(start, end);
 
         let attempts = 0;
-        const maxAttempts = 3;
         
         while (true) {
           try {
@@ -183,17 +190,17 @@ IMPORTANTE:
             // Delay adaptativo entre chunks para respeitar rate limit da OpenAI
             // Se ainda há mais chunks, adiciona delay
             if (i < total - 1) {
-              const minTimePerChunk = 10; // 10s por chunk = ~6 req/min (mais conservador)
               const timeElapsed = chunkTime;
               
-              if (timeElapsed < minTimePerChunk) {
-                const delayNeeded = (minTimePerChunk - timeElapsed) * 1000;
+              if (timeElapsed < RATE_LIMIT_CONFIG.minTimePerChunk) {
+                const delayNeeded = (RATE_LIMIT_CONFIG.minTimePerChunk - timeElapsed) * 1000;
                 console.log(`⏱️  Aguardando ${(delayNeeded / 1000).toFixed(1)}s antes do próximo lote...`);
                 await new Promise(r => setTimeout(r, delayNeeded));
               } else {
                 // Mesmo se o chunk demorou mais, adiciona um delay mínimo
-                console.log(`⏱️  Aguardando 2s antes do próximo lote...`);
-                await new Promise(r => setTimeout(r, 2000));
+                const minDelay = RATE_LIMIT_CONFIG.minDelayBetweenChunks * 1000;
+                console.log(`⏱️  Aguardando ${RATE_LIMIT_CONFIG.minDelayBetweenChunks}s antes do próximo lote...`);
+                await new Promise(r => setTimeout(r, minDelay));
               }
             }
             
@@ -201,12 +208,16 @@ IMPORTANTE:
           } catch (e) {
             attempts++;
             const msg = e instanceof Error ? e.message : String(e);
-            if (attempts >= maxAttempts || !/429|rate limit|too large|TPM/i.test(msg)) {
+            
+            // Se não for erro de rate limit ou excedeu tentativas, falha
+            if (attempts >= RATE_LIMIT_CONFIG.maxRetries || !/429|rate limit|too large|TPM/i.test(msg)) {
               throw e;
             }
+            
             // Backoff exponencial mais agressivo para rate limit
-            const delay = 5000 * Math.pow(2, attempts - 1); // 5s, 10s, 20s
-            console.warn(`⚠️  Lote ${i + 1}/${total} falhou (rate limit). Retentando em ${(delay/1000).toFixed(0)}s...`);
+            const delay = RATE_LIMIT_CONFIG.baseRetryDelay * Math.pow(2, attempts - 1); // 10s, 20s, 40s, 80s, 160s
+            console.warn(`⚠️  Lote ${i + 1}/${total} falhou (tentativa ${attempts}/${RATE_LIMIT_CONFIG.maxRetries}). Retentando em ${(delay/1000).toFixed(0)}s...`);
+            console.warn(`   Motivo: ${msg}`);
             await new Promise(r => setTimeout(r, delay));
           }
         }
@@ -219,7 +230,6 @@ IMPORTANTE:
       console.log('📡 Enviando dados para processamento com OpenAI...');
       
       let attempts = 0;
-      const maxAttempts = 3;
       
       while (true) {
         try {
@@ -231,12 +241,16 @@ IMPORTANTE:
         } catch (e) {
           attempts++;
           const msg = e instanceof Error ? e.message : String(e);
-          if (attempts >= maxAttempts || !/429|rate limit|too large|TPM/i.test(msg)) {
+          
+          // Se não for erro de rate limit ou excedeu tentativas, falha
+          if (attempts >= RATE_LIMIT_CONFIG.maxRetries || !/429|rate limit|too large|TPM/i.test(msg)) {
             throw e;
           }
+          
           // Backoff exponencial para rate limit
-          const delay = 5000 * Math.pow(2, attempts - 1); // 5s, 10s, 20s
-          console.warn(`⚠️ Processamento falhou (rate limit). Retentando em ${(delay/1000).toFixed(0)}s...`);
+          const delay = RATE_LIMIT_CONFIG.baseRetryDelay * Math.pow(2, attempts - 1); // 10s, 20s, 40s, 80s, 160s
+          console.warn(`⚠️ Processamento falhou (tentativa ${attempts}/${RATE_LIMIT_CONFIG.maxRetries}). Retentando em ${(delay/1000).toFixed(0)}s...`);
+          console.warn(`   Motivo: ${msg}`);
           await new Promise(r => setTimeout(r, delay));
         }
       }
