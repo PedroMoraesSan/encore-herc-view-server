@@ -2,13 +2,21 @@ import { api, APIError } from "encore.dev/api";
 import { readExcelFile, validateExcelFilename } from './excel';
 import { processExcelData } from './processing';
 import { createHistory, updateHistory } from '../history/history';
+import { ExcelRow } from '../shared/types';
 
 /**
  * Upload and Process Request
- * File is sent as base64 encoded string
+ * ATUALIZADO: Suporta dois formatos
+ * 1. Novo (preferido): data - dados já parseados como JSON
+ * 2. Legado: file - arquivo como base64 encoded string
  */
 interface UploadRequest {
-  file: string; // base64 encoded
+  // Método novo: dados já parseados (mais eficiente)
+  data?: ExcelRow[];
+  
+  // Método legado: arquivo base64 (fallback)
+  file?: string;
+  
   filename: string;
   prompt?: string;
 }
@@ -24,9 +32,11 @@ interface UploadResponse {
 
 /**
  * Validate Request
+ * ATUALIZADO: Suporta ambos formatos
  */
 interface ValidateRequest {
-  file: string; // base64 encoded
+  data?: ExcelRow[];
+  file?: string; // base64 encoded
   filename: string;
 }
 
@@ -72,26 +82,40 @@ export const upload = api(
         );
       }
 
-      // Convert base64 to Buffer
-      const fileBuffer = Buffer.from(req.file, 'base64');
+      // NOVO: Suportar ambos os formatos (data JSON ou file base64)
+      let rawData: ExcelRow[];
+      let fileSize: number;
       
-      console.log(`📁 Arquivo recebido: ${req.filename} (${fileBuffer.length} bytes)`);
-
-      // Read Excel data
-      console.log('📖 Lendo dados do arquivo Excel...');
-      const rawData = readExcelFile(fileBuffer);
+      if (req.data) {
+        // Método novo: dados já vêm parseados como JSON
+        console.log('📊 Dados recebidos como JSON (método otimizado)');
+        rawData = req.data;
+        fileSize = JSON.stringify(req.data).length; // Tamanho aproximado
+        console.log(`✅ ${rawData.length} registros recebidos diretamente`);
+      } else if (req.file) {
+        // Método legado: arquivo base64
+        console.log('📁 Arquivo recebido como base64 (método legado)');
+        const fileBuffer = Buffer.from(req.file, 'base64');
+        fileSize = fileBuffer.length;
+        
+        console.log(`📁 Arquivo: ${req.filename} (${fileSize} bytes)`);
+        console.log('📖 Lendo dados do arquivo Excel...');
+        
+        rawData = readExcelFile(fileBuffer);
+        console.log(`✅ ${rawData.length} registros encontrados no arquivo`);
+      } else {
+        throw APIError.invalidArgument('Nenhum dado fornecido (esperado "data" ou "file")');
+      }
 
       if (!rawData || rawData.length === 0) {
         throw APIError.invalidArgument('Arquivo Excel está vazio ou não contém dados');
       }
 
-      console.log(`✅ ${rawData.length} registros encontrados no arquivo`);
-
       // Create history record
       try {
         historyId = await createHistory({
           originalFileName: req.filename,
-          fileSize: fileBuffer.length,
+          fileSize: fileSize,
           recordsCount: rawData.length,
           customPrompt: req.prompt,
           modelUsed: 'gpt-4o',
@@ -190,16 +214,29 @@ export const validate = api(
         );
       }
 
-      // Convert base64 to Buffer
-      const fileBuffer = Buffer.from(req.file, 'base64');
-      const rawData = readExcelFile(fileBuffer);
+      // Suportar ambos os formatos
+      let rawData: ExcelRow[];
+      let fileSize: number;
+      
+      if (req.data) {
+        // Dados já parseados
+        rawData = req.data;
+        fileSize = JSON.stringify(req.data).length;
+      } else if (req.file) {
+        // Arquivo base64
+        const fileBuffer = Buffer.from(req.file, 'base64');
+        rawData = readExcelFile(fileBuffer);
+        fileSize = fileBuffer.length;
+      } else {
+        throw APIError.invalidArgument('Nenhum dado fornecido');
+      }
 
       return {
         success: true,
         message: 'Arquivo válido',
         data: {
           filename: req.filename,
-          size: fileBuffer.length,
+          size: fileSize,
           records: rawData.length,
           columns: rawData.length > 0 ? Object.keys(rawData[0]) : [],
         },
