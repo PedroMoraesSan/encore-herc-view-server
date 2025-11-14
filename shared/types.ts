@@ -1,11 +1,21 @@
 /**
  * Shared types used across all services
+ * 
+ * Para tipos validados com Zod, veja shared/schemas.ts
  */
 
+/**
+ * @deprecated Use AlarmEvent from schemas.ts para validação de tipos
+ * Mantido para compatibilidade com código legado
+ */
 export interface ExcelRow {
   [key: string]: any;
 }
 
+/**
+ * @deprecated Use ProcessedReport from schemas.ts para validação de tipos
+ * Mantido para compatibilidade com código legado
+ */
 export interface ProcessedData {
   [key: string]: any;
 }

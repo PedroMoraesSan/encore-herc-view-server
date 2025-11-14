@@ -1,277 +1,212 @@
 import { ExcelRow } from '../shared/types';
 import { processDataWithGroq, parseGroqResponse } from './groq';
+import { processDataWithOpenAI } from './openai';
+import { processDataWithAnthropic } from './anthropic';
 import { createExcelFile } from './excel';
+import { RATE_LIMIT_CONFIG, PROCESSING_CONFIG } from '../shared/business-rules';
+import { retryWithExponentialBackoff } from '../shared/retry-utils';
+import { logger, logOperationStart, logOperationComplete } from '../shared/logger';
+import { MINIMAL_REPLICATION_PROMPT } from '../shared/prompts';
+import { parseAIResponse } from '../shared/ai-response-parser';
 
 /**
- * Normaliza horários de ABERTURA/FECHAMENTO conforme regras do negócio
+ * PROCESSAMENTO GUIADO APENAS POR PROMPT
+ * 
+ * Este arquivo contém APENAS lógica técnica de:
+ * - Chunking de dados grandes
+ * - Rate limiting e retry
+ * - Chamadas à IA
+ * 
+ * TODAS as regras de negócio estão NO PROMPT da IA.
+ * O código não valida, normaliza ou altera dados - apenas envia para a IA e retorna o resultado.
  */
-function normalizeOpenCloseTimes(rows: any[]): any[] {
-  const parseDate = (value: any): Date | null => {
-    if (!value) return null;
-    if (value instanceof Date) return value;
-    if (typeof value === 'number') return new Date(value);
-    if (typeof value === 'string') {
-      const parts = value.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-      if (parts) {
-        const d = Number(parts[1]);
-        const m = Number(parts[2]) - 1;
-        const y = Number(parts[3].length === 2 ? `20${parts[3]}` : parts[3]);
-        const hh = Number(parts[4]);
-        const mm = Number(parts[5]);
-        const ss = Number(parts[6] || 0);
-        return new Date(y, m, d, hh, mm, ss);
-      }
-      const d2 = new Date(value);
-      if (!isNaN(d2.getTime())) return d2;
-    }
-    return null;
-  };
 
-  const formatBack = (date: Date, original: any): any => {
-    const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-    const str = `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-    if (typeof original === 'string') return str;
-    return date;
-  };
+/**
+ * Providers de IA disponíveis
+ */
+export type AIProvider = 'groq' | 'openai' | 'anthropic';
 
-  const getField = (obj: any, candidates: string[]): string | null => {
-    const keys = Object.keys(obj);
-    const found = keys.find(k => candidates.some(c => k.toLowerCase().includes(c.toLowerCase())));
-    return found || null;
-  };
-
-  return rows.map(row => {
-    const descKey = getField(row, ['descrição', 'evento', 'status', 'tipo']);
-    const dateKey = getField(row, ['data de recebimento', 'data/hora', 'data', 'timestamp', 'hora']);
-    if (!dateKey) return row;
-
-    const original = row[dateKey];
-    const dt = parseDate(original);
-    if (!dt) return row;
-
-    const description: string = (descKey ? String(row[descKey]) : '').toUpperCase();
-
-    const setTime = (d: Date, hh: number, mm: number) => {
-      const nd = new Date(d);
-      nd.setHours(hh, mm, 0, 0);
-      return nd;
-    };
-
-    const inRange = (d: Date, startHH: number, startMM: number, endHH: number, endMM: number): boolean => {
-      const t = d.getHours() * 60 + d.getMinutes();
-      const start = startHH * 60 + startMM;
-      const end = endHH * 60 + endMM;
-      return t >= start && t <= end;
-    };
-
-    const isAbertura = /ABERT|DESARM/.test(description);
-    const isFechamento = /FECH|ARMAD/.test(description);
-
-    let adjusted: Date | null = null;
-
-    if (isAbertura) {
-      if (!inRange(dt, 5, 30, 8, 30)) {
-        adjusted = setTime(dt, 7, 0);
-      }
-    } else if (isFechamento) {
-      const minutes = dt.getHours() * 60 + dt.getMinutes();
-      const isSameDayNight = minutes >= (22 * 60 + 30);
-      const isNextDayEarly = minutes <= (1 * 60 + 30);
-
-      if (!(isSameDayNight || isNextDayEarly)) {
-        if (dt.getHours() < 12) {
-          const next = new Date(dt);
-          next.setDate(next.getDate() + 1);
-          adjusted = setTime(next, 0, 30);
-        } else {
-          adjusted = setTime(dt, 22, 30);
-        }
-      }
-    }
-
-    if (adjusted) {
-      row[dateKey] = formatBack(adjusted, original);
-    }
-    return row;
-  });
-}
+/**
+ * Configuração padrão de provider
+ * Altere aqui para testar diferentes modelos
+ */
+const DEFAULT_PROVIDER: AIProvider = 'groq'; // Mude para 'anthropic' para testar Claude
 
 /**
  * Processa um arquivo Excel completo com IA
+ * 
+ * @param data - Dados do Excel a processar
+ * @param customPrompt - Prompt customizado (opcional)
+ * @param provider - Provider de IA a usar (opcional, padrão: groq)
  */
 export async function processExcelData(
   data: ExcelRow[],
-  customPrompt?: string
+  customPrompt?: string,
+  provider: AIProvider = DEFAULT_PROVIDER
 ): Promise<Uint8Array> {
   try {
-    const defaultPrompt = `Você é um especialista em transformação de dados de segurança.
-
-FORMATO DE ENTRADA (você receberá):
-- Empresa, Conta, Data de recebimento, Código do evento, Descrição, Partição, Auxiliar, Descrição do receptor
-- Conta contém: "LOJA XXX" onde XXX é o número da filial
-- Código do evento: 1401 = DESARMADO (abertura), 3401 = ARMADO (fechamento)
-- Descrição: "DESARMADO/ARMADO PELO USUARIO - SR./SRA. NOME DO OPERADOR"
-- Data de recebimento: formato dd/mm/yyyy HH:mm:ss
-
-FORMATO DE SAÍDA (você deve gerar):
-{
-  "data": [
-    {
-      "FILIAL": "número extraído da loja",
-      "UF": "SE",
-      "ABERTURA": "data/hora do DESARMADO (1401)",
-      "FECHAMENTO": "data/hora do ARMADO (3401)",
-      "OPERADOR(A) ABERTURA": "nome extraído do DESARMADO",
-      "OPERADOR(A) FECHAMENTO": "nome extraído do ARMADO"
-    }
-  ]
-}
-
-REGRAS DE TRANSFORMAÇÃO:
-1. Extraia o número da FILIAL da coluna "Conta" (ex: "LOJA 318" → "318")
-2. Agrupe eventos por FILIAL e DIA (apenas data, ignore hora)
-3. Para cada FILIAL + DIA, crie UMA linha com:
-   - ABERTURA = evento com código 1401 (DESARMADO)
-   - FECHAMENTO = evento com código 3401 (ARMADO)
-4. Se um dia tiver apenas ABERTURA ou apenas FECHAMENTO, duplique do dia anterior mantendo a mesma filial
-5. Garanta que cada dia de cada filial tenha 1 ABERTURA e 1 FECHAMENTO
-6. Ordene por FILIAL (crescente) e depois por data (decrescente - mais recente primeiro)
-7. Mantenha o formato de data/hora: dd/mm/yyyy HH:mm:ss
-8. Extraia apenas o NOME do operador da descrição (remova "SR.", "SRA.", "PELO USUARIO", etc)
-
-IMPORTANTE:
-- Mantenha espaços à esquerda dos nomes dos operadores
-- NÃO invente dados
-- Se faltar dia, copie do dia anterior da mesma filial
-- Retorne APENAS o JSON, sem explicações`;
-
-    const prompt = customPrompt || defaultPrompt;
-    const CHUNK_SIZE = 100;
-    const needsChunking = data.length > CHUNK_SIZE;
+    const basePrompt = customPrompt || MINIMAL_REPLICATION_PROMPT;
     
-    // Configuração de rate limiting para Groq
-    // Groq é MUITO mais rápido e tem limites mais generosos!
-    // Free tier: 30 req/min, Paid: 6000 req/min
-    const RATE_LIMIT_CONFIG = {
-      minTimePerChunk: 2, // 2s = ~30 req/min (Groq é rápido!)
-      minDelayBetweenChunks: 1, // 1s mínimo
-      maxRetries: 3, // Menos tentativas necessárias
-      baseRetryDelay: 3000, // 3s base para retry
+    // Selecionar configuração de rate limit baseado no provider
+    const rateLimitConfig = provider === 'anthropic' 
+      ? RATE_LIMIT_CONFIG.ANTHROPIC
+      : provider === 'openai'
+      ? RATE_LIMIT_CONFIG.OPENAI
+      : RATE_LIMIT_CONFIG.GROQ;
+
+    if (!data || data.length === 0) {
+      throw new Error('Não há dados para processar');
+    }
+    
+    logger.ai.info('processing_started', {
+      provider,
+      records_count: data.length,
+      has_custom_prompt: !!customPrompt,
+    });
+
+    const preparePrompt = (attempt: number) => {
+      if (attempt === 0) {
+        return basePrompt;
+      }
+
+      return (
+        `${basePrompt}\n\nATENÇÃO: O resultado anterior não estava em JSON válido. ` +
+        `Responda novamente seguindo STRICTAMENTE o formato JSON {"data": [...]}, ` +
+        `sem comentários, sem vírgulas extras e garantindo que todos os arrays/objetos estejam fechados.`
+      );
     };
 
-    const processChunk = async (chunk: ExcelRow[], idx: number, total: number) => {
-      const chunkPrompt = `${prompt}\n\nIMPORTANTE: Você está processando o LOTE ${idx + 1} de ${total}. Retorne SOMENTE os eventos deste lote.`;
-      const response = await processDataWithGroq(chunk, chunkPrompt);
-      const parsed = parseGroqResponse(response);
-      return Array.isArray(parsed) ? parsed : [];
-    };
+    logOperationStart(logger.ai, 'processing_start', {
+      records_count: data.length,
+    });
 
-    let processedData: any[] = [];
     const processStartTime = Date.now();
-    
-    if (needsChunking) {
-      const total = Math.ceil(data.length / CHUNK_SIZE);
-      console.log(`📦 Processamento em lotes: ${total} lotes de até ${CHUNK_SIZE} registros`);
-      
-      for (let i = 0; i < total; i++) {
-        const chunkStartTime = Date.now();
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, data.length);
-        const slice = data.slice(start, end);
+    let processedData: any[] | null = null;
 
-        let attempts = 0;
-        
-        while (true) {
-          try {
-            console.log(`📡 Enviando lote ${i + 1}/${total}... (${slice.length} registros)`);
-            const result = await processChunk(slice, i, total);
-            const chunkTime = (Date.now() - chunkStartTime) / 1000;
-            console.log(`✅ Lote ${i + 1}/${total} processado em ${chunkTime.toFixed(2)}s (${result.length} registros)`);
-            processedData.push(...result);
-            
-            // Delay adaptativo entre chunks para respeitar rate limit da OpenAI
-            // Se ainda há mais chunks, adiciona delay
-            if (i < total - 1) {
-              const timeElapsed = chunkTime;
-              
-              if (timeElapsed < RATE_LIMIT_CONFIG.minTimePerChunk) {
-                const delayNeeded = (RATE_LIMIT_CONFIG.minTimePerChunk - timeElapsed) * 1000;
-                console.log(`⏱️  Aguardando ${(delayNeeded / 1000).toFixed(1)}s antes do próximo lote...`);
-                await new Promise(r => setTimeout(r, delayNeeded));
-              } else {
-                // Mesmo se o chunk demorou mais, adiciona um delay mínimo
-                const minDelay = RATE_LIMIT_CONFIG.minDelayBetweenChunks * 1000;
-                console.log(`⏱️  Aguardando ${RATE_LIMIT_CONFIG.minDelayBetweenChunks}s antes do próximo lote...`);
-                await new Promise(r => setTimeout(r, minDelay));
-              }
+    // Se dados são muitos (>200 registros), processar em chunks
+    if (data.length > 200) {
+      logger.ai.info('large_dataset_chunking', {
+        total_records: data.length,
+        chunk_size: PROCESSING_CONFIG.CHUNK_SIZE,
+      });
+
+      const chunks = [];
+      for (let i = 0; i < data.length; i += PROCESSING_CONFIG.CHUNK_SIZE) {
+        chunks.push(data.slice(i, i + PROCESSING_CONFIG.CHUNK_SIZE));
+      }
+
+      let allProcessedData: any[] = [];
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        logger.ai.info('processing_chunk', {
+          chunk_number: i + 1,
+          total_chunks: chunks.length,
+          chunk_records: chunk.length,
+        });
+
+        const chunkPrompt = `${basePrompt}\n\nPROCESSANDO CHUNK ${i + 1} de ${chunks.length}. PROCESSE TODOS OS ${chunk.length} REGISTROS DESTE CHUNK.`;
+
+        // Processar com o provider selecionado
+        const response = await retryWithExponentialBackoff(
+          () => {
+            if (provider === 'anthropic') {
+              return processDataWithAnthropic(chunk, chunkPrompt);
+            } else if (provider === 'openai') {
+              return processDataWithOpenAI(chunk, chunkPrompt);
+            } else {
+              return processDataWithGroq(chunk, chunkPrompt);
             }
-            
-            break;
-          } catch (e) {
-            attempts++;
-            const msg = e instanceof Error ? e.message : String(e);
-            
-            // Se não for erro de rate limit ou excedeu tentativas, falha
-            if (attempts >= RATE_LIMIT_CONFIG.maxRetries || !/429|rate limit|too large|TPM/i.test(msg)) {
-              throw e;
-            }
-            
-            // Backoff exponencial mais agressivo para rate limit
-            const delay = RATE_LIMIT_CONFIG.baseRetryDelay * Math.pow(2, attempts - 1); // 10s, 20s, 40s, 80s, 160s
-            console.warn(`⚠️  Lote ${i + 1}/${total} falhou (tentativa ${attempts}/${RATE_LIMIT_CONFIG.maxRetries}). Retentando em ${(delay/1000).toFixed(0)}s...`);
-            console.warn(`   Motivo: ${msg}`);
-            await new Promise(r => setTimeout(r, delay));
+          },
+          {
+            maxRetries: rateLimitConfig.maxRetries,
+            baseDelay: rateLimitConfig.baseRetryDelay,
+            retryableErrors: /429|rate limit|too large|TPM|overloaded/i,
           }
+        );
+
+        const chunkProcessedData = parseAIResponse(response, provider);
+        allProcessedData = allProcessedData.concat(chunkProcessedData);
+
+        // Delay entre chunks
+        if (i < chunks.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, rateLimitConfig.minDelayBetweenChunks * 1000));
         }
       }
-      
-      const totalTime = ((Date.now() - processStartTime) / 1000).toFixed(2);
-      console.log(`✅ Todos os lotes concluídos em ${totalTime}s. Total acumulado: ${processedData.length}`);
+
+      processedData = allProcessedData;
     } else {
-      // Arquivo pequeno (< 100 registros) - mas ainda precisa de retry para rate limit
-      console.log('📡 Enviando dados para processamento com Groq...');
-      
-      let attempts = 0;
-      
-      while (true) {
-        try {
-          const groqResponse = await processDataWithGroq(data, prompt);
-          const processTime = ((Date.now() - processStartTime) / 1000).toFixed(2);
-          console.log(`✅ Resposta recebida do Groq em ${processTime}s`);
-          processedData = parseGroqResponse(groqResponse);
-          break;
-        } catch (e) {
-          attempts++;
-          const msg = e instanceof Error ? e.message : String(e);
-          
-          // Se não for erro de rate limit ou excedeu tentativas, falha
-          if (attempts >= RATE_LIMIT_CONFIG.maxRetries || !/429|rate limit|too large|TPM/i.test(msg)) {
-            throw e;
+      // Processamento normal para datasets pequenos
+      const MAX_ATTEMPTS = 2;
+      let lastParseError: unknown = null;
+
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        const prompt = preparePrompt(attempt);
+
+        const response = await retryWithExponentialBackoff(
+          () => {
+            if (provider === 'anthropic') {
+              return processDataWithAnthropic(data, prompt);
+            } else if (provider === 'openai') {
+              return processDataWithOpenAI(data, prompt);
+            } else {
+              return processDataWithGroq(data, prompt);
+            }
+          },
+          {
+            maxRetries: rateLimitConfig.maxRetries,
+            baseDelay: rateLimitConfig.baseRetryDelay,
+            retryableErrors: /429|rate limit|too large|TPM|overloaded/i,
+            onRetry: (attemptNumber, error, delayMs) => {
+              logger.ai.warn('processing_retry', {
+                provider,
+                attempt: attemptNumber,
+                max_retries: rateLimitConfig.maxRetries,
+                error_message: error.message,
+                retry_delay_ms: delayMs,
+              });
+            },
           }
-          
-          // Backoff exponencial para rate limit
-          const delay = RATE_LIMIT_CONFIG.baseRetryDelay * Math.pow(2, attempts - 1); // 10s, 20s, 40s, 80s, 160s
-          console.warn(`⚠️ Processamento falhou (tentativa ${attempts}/${RATE_LIMIT_CONFIG.maxRetries}). Retentando em ${(delay/1000).toFixed(0)}s...`);
-          console.warn(`   Motivo: ${msg}`);
-          await new Promise(r => setTimeout(r, delay));
+        );
+
+        try {
+          processedData = parseAIResponse(response, provider);
+          break;
+        } catch (error) {
+          lastParseError = error;
+          logger.ai.warn('ai_parse_failed', {
+            provider,
+            attempt: attempt + 1,
+            max_attempts: MAX_ATTEMPTS,
+            error_message: error instanceof Error ? error.message : String(error),
+          });
         }
+      }
+
+      if (!processedData) {
+        throw lastParseError instanceof Error
+          ? lastParseError
+          : new Error('Falha ao parsear resposta da IA');
       }
     }
 
-    // Normalização pós-processamento
-    processedData = normalizeOpenCloseTimes(processedData);
-    
+    const processTime = Date.now() - processStartTime;
+    logOperationComplete(logger.ai, `${provider}_processing`, processTime);
+
     if (!Array.isArray(processedData) || processedData.length === 0) {
       throw new Error('Dados processados estão vazios ou em formato inválido');
     }
     
-    console.log(`✅ ${processedData.length} registros processados`);
-    
     // Gerar Excel
-    console.log('📊 Gerando arquivo Excel...');
+    logOperationStart(logger.ai, 'excel_generation', {
+      records_count: processedData.length,
+    });
+    
     const excelBuffer = createExcelFile(processedData);
     
-    console.log('✅ Arquivo Excel gerado com sucesso');
+    logOperationComplete(logger.ai, 'excel_generation', 0, {
+      buffer_size: excelBuffer.length,
+    });
     
     return excelBuffer;
   } catch (error) {

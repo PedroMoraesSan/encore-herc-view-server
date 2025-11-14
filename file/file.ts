@@ -1,8 +1,18 @@
 import { api, APIError } from "encore.dev/api";
-import { readExcelFile, validateExcelFilename } from './excel';
+import { readExcelFile, validateExcelFilename, createExcelFile } from './excel';
 import { processExcelData } from './processing';
+import { processDeterministic, ProcessedRow } from './deterministic-processor';
 import { createHistory, updateHistory } from '../history/history';
 import { ExcelRow } from '../shared/types';
+import { validateAlarmEvents, validateBasicStructure } from '../shared/schemas';
+import { 
+  logger, 
+  logOperationStart, 
+  logOperationComplete, 
+  logValidationWarnings,
+  logHistoryEvent,
+  logError 
+} from '../shared/logger';
 
 /**
  * Upload and Process Request
@@ -19,6 +29,9 @@ interface UploadRequest {
   
   filename: string;
   prompt?: string;
+  
+  // Novo: usar processamento determinístico ao invés de IA
+  useDeterministic?: boolean;
 }
 
 /**
@@ -88,21 +101,27 @@ export const upload = api(
       
       if (req.data) {
         // Método novo: dados já vêm parseados como JSON
-        console.log('📊 Dados recebidos como JSON (método otimizado)');
+        logger.file.info('data_received_json', {
+          filename: req.filename,
+          records_count: req.data.length,
+        });
         rawData = req.data;
         fileSize = JSON.stringify(req.data).length; // Tamanho aproximado
-        console.log(`✅ ${rawData.length} registros recebidos diretamente`);
       } else if (req.file) {
         // Método legado: arquivo base64
-        console.log('📁 Arquivo recebido como base64 (método legado)');
         const fileBuffer = Buffer.from(req.file, 'base64');
         fileSize = fileBuffer.length;
         
-        console.log(`📁 Arquivo: ${req.filename} (${fileSize} bytes)`);
-        console.log('📖 Lendo dados do arquivo Excel...');
+        logger.file.info('data_received_base64', {
+          filename: req.filename,
+          file_size: fileSize,
+        });
         
+        logOperationStart(logger.file, 'excel_parse', { filename: req.filename });
         rawData = readExcelFile(fileBuffer);
-        console.log(`✅ ${rawData.length} registros encontrados no arquivo`);
+        logOperationComplete(logger.file, 'excel_parse', 0, {
+          records_found: rawData.length,
+        });
       } else {
         throw APIError.invalidArgument('Nenhum dado fornecido (esperado "data" ou "file")');
       }
@@ -110,26 +129,79 @@ export const upload = api(
       if (!rawData || rawData.length === 0) {
         throw APIError.invalidArgument('Arquivo Excel está vazio ou não contém dados');
       }
-
-      // Create history record
-      try {
-        historyId = await createHistory({
-          originalFileName: req.filename,
-          fileSize: fileSize,
-          recordsCount: rawData.length,
-          customPrompt: req.prompt,
-          modelUsed: 'llama-3.3-70b-versatile',
+      
+      // Validar estrutura básica dos dados
+      if (!validateBasicStructure(rawData)) {
+        throw APIError.invalidArgument('Estrutura de dados inválida');
+      }
+      
+      // Validação completa (com warnings, não bloqueia)
+      const validation = validateAlarmEvents(rawData);
+      if (!validation.success && validation.errors) {
+        logValidationWarnings(logger.file, 'input_validation', validation.errors, {
+          filename: req.filename,
+          records_count: rawData.length,
         });
-      } catch (dbError) {
-        console.warn('⚠️  Não foi possível salvar histórico no banco:', dbError);
-        // Continue processing even if history save fails
+        // Continua processamento apesar dos warnings
       }
 
-      // Process with AI
-      console.log('🤖 Iniciando processamento com IA...');
-      const excelBuffer = await processExcelData(rawData, req.prompt);
+      // Create history record
+      const createdHistoryId = await createHistory({
+        originalFileName: req.filename,
+        fileSize: fileSize,
+        recordsCount: rawData.length,
+        customPrompt: req.prompt,
+        modelUsed: 'llama-3.3-70b-versatile',
+      });
 
-      console.log(`📦 Buffer gerado: ${excelBuffer.length} bytes`);
+      if (createdHistoryId) {
+        historyId = createdHistoryId;
+        logHistoryEvent(logger.file, 'created', historyId, {
+          filename: req.filename,
+          records: rawData.length,
+        });
+      } else {
+        logger.file.warn('history_save_failed', {
+          error: 'create_history_returned_null',
+          filename: req.filename,
+        });
+      }
+
+      // Process with AI or Deterministic
+      let excelBuffer: Uint8Array;
+      
+      if (req.useDeterministic) {
+        // Processamento determinístico (baseado nas regras do ChatGPT)
+        logOperationStart(logger.file, 'deterministic_processing', {
+          filename: req.filename,
+          records: rawData.length,
+        });
+        
+        const processedData = processDeterministic(rawData);
+        excelBuffer = createExcelFile(processedData);
+        
+        logOperationComplete(logger.file, 'deterministic_processing', 0, {
+          records_processed: processedData.length,
+        });
+      } else {
+        // Processamento com IA (método original)
+      logOperationStart(logger.file, 'ai_processing', {
+        filename: req.filename,
+        records: rawData.length,
+        has_custom_prompt: !!req.prompt,
+      });
+      
+        excelBuffer = await processExcelData(rawData, req.prompt);
+        
+        logOperationComplete(logger.file, 'ai_processing', 0, {
+          records: rawData.length,
+        });
+      }
+
+      logger.file.info('buffer_generated', {
+        buffer_size: excelBuffer.length,
+        size_mb: (excelBuffer.length / (1024 * 1024)).toFixed(2),
+      });
 
       if (!excelBuffer || excelBuffer.length === 0) {
         throw APIError.internal('Arquivo processado está vazio');
@@ -140,7 +212,11 @@ export const upload = api(
       const nameWithoutExt = req.filename.substring(0, req.filename.lastIndexOf('.'));
       const processedFilename = `${nameWithoutExt}-processado-${timestamp}.xlsx`;
 
-      console.log(`✅ Relatório gerado: ${processedFilename}`);
+      logOperationComplete(logger.file, 'file_processing', Date.now() - startTime, {
+        original_filename: req.filename,
+        processed_filename: processedFilename,
+        buffer_size: excelBuffer.length,
+      });
 
       // Update history with success
       if (historyId) {
@@ -151,8 +227,16 @@ export const upload = api(
             processedFileName: processedFilename,
             processingTimeMs: Date.now() - startTime,
           });
+          
+          logHistoryEvent(logger.file, 'updated', historyId, {
+            status: 'SUCCESS',
+            duration_ms: Date.now() - startTime,
+          });
         } catch (dbError) {
-          console.warn('⚠️  Não foi possível atualizar histórico:', dbError);
+          logger.file.warn('history_update_failed', {
+            error: dbError instanceof Error ? dbError.message : 'Unknown error',
+            history_id: historyId,
+          });
         }
       }
 
@@ -164,7 +248,10 @@ export const upload = api(
         filename: processedFilename,
       };
     } catch (error) {
-      console.error('❌ Erro no upload and process:', error);
+      logError(logger.file, 'upload_and_process', error as Error, {
+        filename: req.filename,
+        has_history_id: !!historyId,
+      });
 
       // Update history with error
       if (historyId) {
@@ -175,8 +262,16 @@ export const upload = api(
             errorMessage: error instanceof Error ? error.message : 'Erro desconhecido',
             processingTimeMs: Date.now() - startTime,
           });
+          
+          logHistoryEvent(logger.file, 'updated', historyId, {
+            status: 'ERROR',
+            error_message: error instanceof Error ? error.message : 'Unknown',
+          });
         } catch (dbError) {
-          console.warn('⚠️  Não foi possível atualizar histórico com erro:', dbError);
+          logger.file.warn('history_update_failed_on_error', {
+            error: dbError instanceof Error ? dbError.message : 'Unknown error',
+            history_id: historyId,
+          });
         }
       }
 

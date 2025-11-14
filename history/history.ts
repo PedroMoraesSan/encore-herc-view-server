@@ -96,7 +96,8 @@ export const list = api(
     const skip = (page - 1) * pageSize;
 
     // Get records
-    const records = await db.query<ProcessingHistory>`
+    const records: ProcessingHistory[] = [];
+    for await (const row of db.query<ProcessingHistory>`
       SELECT 
         id,
         original_file_name as "originalFileName",
@@ -114,14 +115,19 @@ export const list = api(
       FROM processing_history
       ORDER BY started_at DESC
       LIMIT ${pageSize} OFFSET ${skip}
-    `;
+    `) {
+      records.push(row);
+    }
 
     // Get total count
-    const totalResult = await db.query<{ count: number }>`
+    let total = 0;
+    for await (const row of db.query<{ count: number }>`
       SELECT COUNT(*)::int as count
       FROM processing_history
-    `;
-    const total = totalResult[0]?.count || 0;
+    `) {
+      total = row.count;
+      break;
+    }
 
     return {
       success: true,
@@ -151,7 +157,8 @@ export const get = api(
       throw APIError.invalidArgument("ID não fornecido");
     }
 
-    const records = await db.query<ProcessingHistory>`
+    const records: ProcessingHistory[] = [];
+    for await (const row of db.query<ProcessingHistory>`
       SELECT 
         id,
         original_file_name as "originalFileName",
@@ -168,7 +175,9 @@ export const get = api(
         completed_at as "completedAt"
       FROM processing_history
       WHERE id = ${req.id}
-    `;
+    `) {
+      records.push(row);
+    }
 
     if (records.length === 0) {
       throw APIError.notFound("Histórico não encontrado");
@@ -192,7 +201,18 @@ export const stats = api(
     expose: true,
   },
   async (): Promise<StatsResponse> => {
-    const statsResult = await db.query<{
+    let result: {
+      total: number;
+      successful: number;
+      failed: number;
+      avg_time: number | null;
+    } = {
+      total: 0,
+      successful: 0,
+      failed: 0,
+      avg_time: null,
+    };
+    for await (const row of db.query<{
       total: number;
       successful: number;
       failed: number;
@@ -204,14 +224,10 @@ export const stats = api(
         COUNT(*) FILTER (WHERE status = 'ERROR')::int as failed,
         AVG(processing_time_ms) FILTER (WHERE status = 'SUCCESS') as avg_time
       FROM processing_history
-    `;
-
-    const result = statsResult[0] || {
-      total: 0,
-      successful: 0,
-      failed: 0,
-      avg_time: null,
-    };
+    `) {
+      result = row;
+      break;
+    }
 
     return {
       success: true,
@@ -235,31 +251,44 @@ export const stats = api(
  */
 export async function createHistory(
   input: CreateHistoryInput
-): Promise<string> {
-  const result = await db.query<{ id: string }>`
-    INSERT INTO processing_history (
-      original_file_name,
-      file_size,
-      records_count,
-      custom_prompt,
-      model_used,
-      status,
-      started_at
-    ) VALUES (
-      ${input.originalFileName},
-      ${input.fileSize},
-      ${input.recordsCount},
-      ${input.customPrompt || null},
-      ${input.modelUsed || 'gpt-4o'},
-      'PROCESSING',
-      NOW()
-    )
-    RETURNING id
-  `;
+): Promise<string | null> {
+  try {
+    let id: string | null = null;
+    for await (const row of db.query<{ id: string }>`
+      INSERT INTO processing_history (
+        original_file_name,
+        file_size,
+        records_count,
+        custom_prompt,
+        model_used,
+        status,
+        started_at
+      ) VALUES (
+        ${input.originalFileName},
+        ${input.fileSize},
+        ${input.recordsCount},
+        ${input.customPrompt || null},
+        ${input.modelUsed || 'gpt-4o'},
+        'PROCESSING',
+        NOW()
+      )
+      RETURNING id
+    `) {
+      id = row.id;
+      break;
+    }
 
-  const id = result[0].id;
-  console.log(`📝 Histórico criado: ${id}`);
-  return id;
+    if (!id) {
+      console.warn('⚠️  Histórico não retornou ID após inserção');
+      return null;
+    }
+
+    console.log(`📝 Histórico criado: ${id}`);
+    return id;
+  } catch (error) {
+    console.error('❌ Erro ao criar histórico:', error);
+    return null;
+  }
 }
 
 /**
@@ -267,6 +296,11 @@ export async function createHistory(
  * Used by file service when finishing processing
  */
 export async function updateHistory(input: UpdateHistoryInput): Promise<void> {
+  if (!input.id) {
+    console.warn('⚠️  updateHistory chamado sem ID válido');
+    return;
+  }
+
   await db.exec`
     UPDATE processing_history
     SET 

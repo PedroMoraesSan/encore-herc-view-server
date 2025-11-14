@@ -8,7 +8,7 @@ export function readExcelFile(buffer: Buffer | Uint8Array): ExcelRow[] {
   try {
     const workbook = XLSX.read(buffer, { 
       type: 'buffer',
-      cellDates: true,
+      cellDates: true, // Preserva datas como objetos Date
       cellNF: false,
       cellText: false,
     });
@@ -17,8 +17,9 @@ export function readExcelFile(buffer: Buffer | Uint8Array): ExcelRow[] {
     const worksheet = workbook.Sheets[sheetName];
     
     // Converte para JSON
+    // IMPORTANTE: raw: true mantém valores nativos (incluindo Date objects)
     const data = XLSX.utils.sheet_to_json(worksheet, {
-      raw: false,
+      raw: true, // Preserva valores nativos (Date, Number, etc.)
       defval: null,
     }) as ExcelRow[];
     
