@@ -178,7 +178,13 @@ function extractFilial(conta: any): string {
     return lojaMatch[1];
   }
   
-  // PRIORIDADE 2: Se não tiver "LOJA", retorna número da conta + nome completo
+  // PRIORIDADE 2: "ESCRITÓRIO CENTRAL" -> "ESCRITÓRIO"
+  // IMPORTANTE: Verificar antes de retornar nome completo
+  if (contaStrUpper.includes('ESCRITÓRIO')) {
+    return 'ESCRITÓRIO';
+  }
+  
+  // PRIORIDADE 3: Se não tiver "LOJA" nem "ESCRITÓRIO", retorna número da conta + nome completo
   // Exemplo: "3691 - SÃO LUIZ SUPERMERCADO SHOPPING DEL PASSEO (DISTRIBUIDORA DE ALIMENTOS FARTURA S.A)"
   // -> "3691 - SÃO LUIZ SUPERMERCADO SHOPPING DEL PASSEO (DISTRIBUIDORA DE ALIMENTOS FARTURA S.A)"
   
@@ -188,11 +194,6 @@ function extractFilial(conta: any): string {
   // Se após remover LOJA ainda tiver conteúdo, retornar
   if (resultado && resultado.length > 0) {
     return resultado;
-  }
-  
-  // PRIORIDADE 3: "ESCRITÓRIO CENTRAL" -> "ESCRITÓRIO"
-  if (contaStrUpper.includes('ESCRITÓRIO')) {
-    return 'ESCRITÓRIO';
   }
   
   // PRIORIDADE 4: Se já é um número, retorna direto
