@@ -32,6 +32,9 @@ interface UploadRequest {
   
   // Novo: usar processamento determinístico ao invés de IA
   useDeterministic?: boolean;
+  
+  // UF (Unidade Federativa) para processamento determinístico
+  uf?: string;
 }
 
 /**
@@ -175,9 +178,10 @@ export const upload = api(
         logOperationStart(logger.file, 'deterministic_processing', {
           filename: req.filename,
           records: rawData.length,
+          uf: req.uf || 'SE',
         });
         
-        const processedData = processDeterministic(rawData);
+        const processedData = processDeterministic(rawData, req.uf || 'SE');
         excelBuffer = createExcelFile(processedData);
         
         logOperationComplete(logger.file, 'deterministic_processing', 0, {

@@ -157,28 +157,50 @@ function isInCloseWindow(date: Date): boolean {
 
 /**
  * Extrai número da filial da coluna "Conta"
+ * 
+ * PRIORIDADE:
+ * 1. Se tiver "LOJA X", retorna o número da loja
+ * 2. Se não tiver "LOJA", retorna número da conta + nome completo do cliente
+ * 3. Se for "ESCRITÓRIO", retorna "ESCRITÓRIO"
+ * 4. Se for apenas número, retorna o número
  */
 function extractFilial(conta: any): string {
   if (!conta) return 'INDEFINIDO';
   
-  const contaStr = String(conta).toUpperCase();
+  const contaStr = String(conta).trim();
+  const contaStrUpper = contaStr.toUpperCase();
   
-  // Padrão: "PAGUE MENOS (LOJA 318)" -> "318"
-  const match = contaStr.match(/LOJA\s*(\d+)/i);
-  if (match) {
-    return match[1];
+  // PRIORIDADE 1: Se tiver "LOJA X", retorna o número da loja
+  // Exemplo: "3691 - SÃO LUIZ SUPERMERCADO (LOJA 19)..." -> "19"
+  // Exemplo: "PAGUE MENOS (LOJA 318)" -> "318"
+  const lojaMatch = contaStrUpper.match(/LOJA\s*(\d+)/i);
+  if (lojaMatch && lojaMatch[1]) {
+    return lojaMatch[1];
   }
   
-  // Padrão: "ESCRITÓRIO CENTRAL" -> "ESCRITÓRIO"
-  if (contaStr.includes('ESCRITÓRIO')) {
+  // PRIORIDADE 2: Se não tiver "LOJA", retorna número da conta + nome completo
+  // Exemplo: "3691 - SÃO LUIZ SUPERMERCADO SHOPPING DEL PASSEO (DISTRIBUIDORA DE ALIMENTOS FARTURA S.A)"
+  // -> "3691 - SÃO LUIZ SUPERMERCADO SHOPPING DEL PASSEO (DISTRIBUIDORA DE ALIMENTOS FARTURA S.A)"
+  
+  // Remover a parte "(LOJA X)" se existir (caso não tenha sido capturada acima)
+  let resultado = contaStr.replace(/\s*\(LOJA\s*\d+\)\s*/gi, '').trim();
+  
+  // Se após remover LOJA ainda tiver conteúdo, retornar
+  if (resultado && resultado.length > 0) {
+    return resultado;
+  }
+  
+  // PRIORIDADE 3: "ESCRITÓRIO CENTRAL" -> "ESCRITÓRIO"
+  if (contaStrUpper.includes('ESCRITÓRIO')) {
     return 'ESCRITÓRIO';
   }
   
-  // Se já é um número, retorna direto
+  // PRIORIDADE 4: Se já é um número, retorna direto
   if (/^\d+$/.test(contaStr.trim())) {
     return contaStr.trim();
   }
   
+  // Fallback: retorna a string original
   return contaStr;
 }
 
@@ -256,21 +278,71 @@ function getOperadorOriginal(row: ExcelRow): string {
     // - "DESARMADO PELO USUÁRIO  - SR. JOÃO" -> "JOÃO"
     // - "ARMADO PELO USUARIO - MARIA" -> "MARIA"
     // - "DESARMADO POR USUARIO - PEDRO" -> "PEDRO"
+    // - "ARMADO PELO USUARIO - SRA. MARIA SILVA" -> "MARIA SILVA"
     
-    // Regex para capturar nome após "PELO USUARIO" ou "PELO USUÁRIO" ou "POR USUARIO"
+    // Múltiplos padrões para capturar diferentes formatos
+    
+    // Padrão 1: Com SR./SRA. e hífen/espaços
     // Exemplo: "ARMADO PELO USUARIO  - SRA. JOSEFÁ" -> captura "JOSEFÁ"
-    // Exemplo: "DESARMADO PELO USUÁRIO  - SR. JOÃO" -> captura "JOÃO"
+    // Exemplo: "ARMADO PELO USUARIO  - SRA. MARIA SILVA" -> captura "MARIA SILVA"
+    let pattern1 = /(?:PELO|POR)\s+USU[ÁA]RIO\s*[-\s]+\s*(?:SR\.|SRA\.)\s+([^\s][^\d\-–—]+?)(?:\s*[-–—]|\s*$|\s*\d)/i;
+    let match1 = descricaoStr.match(pattern1);
+    if (match1 && match1[1]) {
+      const nomeExtraido = match1[1].trim();
+      // Validar que não é apenas o prefixo e tem conteúdo válido (mínimo 2 caracteres)
+      if (nomeExtraido && nomeExtraido.length >= 2 && !/^(SR\.|SRA\.)$/i.test(nomeExtraido)) {
+        const nomeLimpo = cleanOperadorName(nomeExtraido);
+        if (nomeLimpo && nomeLimpo.length >= 2) {
+          return nomeLimpo;
+        }
+      }
+    }
     
-    // Padrão principal: captura tudo após "PELO USUARIO" ou "PELO USUÁRIO" seguido de hífen/espaços e opcionalmente SR./SRA.
-    const pattern = /(?:PELO|POR)\s+USU[ÁA]RIO\s*[-\s]+\s*(?:SR\.|SRA\.)?\s*(.+)/i;
-    const match = descricaoStr.match(pattern);
+    // Padrão 2: Com SR./SRA. sem hífen (apenas espaços)
+    // Exemplo: "ARMADO PELO USUARIO SRA. JOSEFÁ" -> captura "JOSEFÁ"
+    let pattern2 = /(?:PELO|POR)\s+USU[ÁA]RIO\s+(?:SR\.|SRA\.)\s+([^\s][^\d\-–—]+?)(?:\s*[-–—]|\s*$|\s*\d)/i;
+    let match2 = descricaoStr.match(pattern2);
+    if (match2 && match2[1]) {
+      const nomeExtraido = match2[1].trim();
+      if (nomeExtraido && nomeExtraido.length >= 2 && !/^(SR\.|SRA\.)$/i.test(nomeExtraido)) {
+        const nomeLimpo = cleanOperadorName(nomeExtraido);
+        if (nomeLimpo && nomeLimpo.length >= 2) {
+          return nomeLimpo;
+        }
+      }
+    }
     
-    if (match && match[1]) {
-      const nomeExtraido = match[1].trim();
-      // Remover qualquer coisa após o nome (como hífens ou outros caracteres)
-      const nomeLimpo = nomeExtraido.split(/[-–\s]+/)[0].trim();
-      if (nomeLimpo && nomeLimpo.length > 0) {
-        return cleanOperadorName(nomeLimpo);
+    // Padrão 3: Sem SR./SRA., apenas com hífen/espaços
+    // Exemplo: "ARMADO PELO USUARIO - MARIA" -> captura "MARIA"
+    let pattern3 = /(?:PELO|POR)\s+USU[ÁA]RIO\s*[-\s]+\s*([^\s][^\d\-–—]+?)(?:\s*[-–—]|\s*$|\s*\d)/i;
+    let match3 = descricaoStr.match(pattern3);
+    if (match3 && match3[1]) {
+      const nomeExtraido = match3[1].trim();
+      // Validar que não é apenas o prefixo
+      if (nomeExtraido && nomeExtraido.length >= 2 && !/^(SR\.|SRA\.)$/i.test(nomeExtraido)) {
+        const nomeLimpo = cleanOperadorName(nomeExtraido);
+        if (nomeLimpo && nomeLimpo.length >= 2) {
+          return nomeLimpo;
+        }
+      }
+    }
+    
+    // Padrão 4: Fallback - captura qualquer coisa após "PELO USUARIO" ou "POR USUARIO"
+    // Último recurso para formatos não previstos
+    let pattern4 = /(?:PELO|POR)\s+USU[ÁA]RIO\s*[:\-\s]+\s*(.+?)(?:\s*[-–—]|\s*$|\s*\d)/i;
+    let match4 = descricaoStr.match(pattern4);
+    if (match4 && match4[1]) {
+      const nomeExtraido = match4[1].trim();
+      // Remover SR./SRA. se estiver no início e pegar o que vem depois
+      let nomeLimpo = nomeExtraido.replace(/^(SR\.|SRA\.)\s*/i, '').trim();
+      // Remover caracteres especiais no final
+      nomeLimpo = nomeLimpo.replace(/[-–—]+.*$/, '').trim();
+      // Validar que não é apenas o prefixo e tem conteúdo válido
+      if (nomeLimpo && nomeLimpo.length >= 2 && !/^(SR\.|SRA\.)$/i.test(nomeLimpo)) {
+        const nomeFinal = cleanOperadorName(nomeLimpo);
+        if (nomeFinal && nomeFinal.length >= 2) {
+          return nomeFinal;
+        }
       }
     }
   }
@@ -290,15 +362,22 @@ function cleanOperadorName(nome: string): string {
   // Se estiver vazio após trim, retornar vazio
   if (!cleaned) return '';
   
-  // Remover prefixos comuns (case insensitive)
+  // Se for apenas "SR." ou "SRA." sem nome, retornar vazio
+  if (/^(SR\.|SRA\.)$/i.test(cleaned)) return '';
+  
+  // Remover prefixos comuns (case insensitive) apenas se estiverem no início
   // Padrões: "SR.", "SRA.", "PELO USUARIO", "PELO USUÁRIO", "POR USUARIO", "POR USUÁRIO"
-  cleaned = cleaned.replace(/^(SR\.|SRA\.|PELO\s+USUARIO|PELO\s+USUÁRIO|POR\s+USUARIO|POR\s+USUÁRIO|PELO\s+USUÁRIO\s+)\s*/i, '');
+  cleaned = cleaned.replace(/^(SR\.|SRA\.)\s+/i, ''); // Remove SR./SRA. apenas se seguido de espaço
+  cleaned = cleaned.replace(/^(PELO\s+USUARIO|PELO\s+USUÁRIO|POR\s+USUARIO|POR\s+USUÁRIO)\s*/i, '');
   
   // Remover espaços extras no início e fim, mas manter espaços internos
   cleaned = cleaned.trim();
   
-  // Se após limpeza ficar vazio, retornar vazio
-  if (!cleaned) return '';
+  // Remover caracteres especiais no final (hífens, traços, etc)
+  cleaned = cleaned.replace(/[-–—]+.*$/, '').trim();
+  
+  // Se após limpeza ficar vazio ou for apenas "SR." ou "SRA.", retornar vazio
+  if (!cleaned || /^(SR\.|SRA\.)$/i.test(cleaned)) return '';
   
   return cleaned;
 }
@@ -441,9 +520,10 @@ function ensureUniqueTimestamps(rows: ProcessedRow[]): ProcessedRow[] {
  * Processa dados brutos e aplica todas as regras de negócio
  * 
  * @param rawData - Array de linhas do Excel original
+ * @param uf - Unidade Federativa (padrão: 'SE' para Sergipe)
  * @returns Array de linhas processadas
  */
-export function processDeterministic(rawData: ExcelRow[]): ProcessedRow[] {
+export function processDeterministic(rawData: ExcelRow[], uf: string = 'SE'): ProcessedRow[] {
   // Debug: Verificar estrutura dos dados
   if (rawData.length > 0) {
     const firstRow = rawData[0];
@@ -827,7 +907,7 @@ export function processDeterministic(rawData: ExcelRow[]): ProcessedRow[] {
       
       const processedRow: ProcessedRow = {
         FILIAL: filial,
-        UF: 'SE', // Pode ser extraído dos dados originais se disponível
+        UF: uf, // UF passada como parâmetro
         ABERTURA: formatDateTime(abertura),
         FECHAMENTO: formatDateTime(fechamento),
         'OPERADOR(A) ABERTURA': aberturaOperador || '',
