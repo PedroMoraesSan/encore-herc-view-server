@@ -188,8 +188,16 @@ function extractFilial(conta: any): string {
  * 
  * Abordagem robusta: busca em todas as chaves do objeto por padrões relacionados
  * E também extrai da coluna "Descrição" quando o nome está lá
+ * 
+ * ESPECIAL: Se for ARME REMOTO, retorna "ARME REMOTO" diretamente
  */
 function getOperadorOriginal(row: ExcelRow): string {
+  // Verificar se é ARME REMOTO - se for, retornar "ARME REMOTO" diretamente
+  const descricao = String(row['Descrição'] || '').toUpperCase();
+  if (descricao.includes('ARME REMOTO') || descricao.includes('ARMADO REMOTO')) {
+    return 'ARME REMOTO';
+  }
+  
   // Lista de possíveis nomes de colunas (case insensitive)
   const possibleKeys = [
     'Usuário', 'Usuario', 'USUÁRIO', 'USUARIO',
@@ -238,9 +246,10 @@ function getOperadorOriginal(row: ExcelRow): string {
   // NOVO: Extrair da coluna "Descrição" se o nome do operador estiver lá
   // Exemplo: "ARMADO PELO USUARIO  - SRA. JOSEFÁ" -> "JOSEFÁ"
   // Exemplo: "DESARMADO PELO USUÁRIO  - SR. JOÃO" -> "JOÃO"
-  const descricao = row['Descrição'];
-  if (descricao) {
-    const descricaoStr = String(descricao).trim();
+  // NOTA: ARME REMOTO já foi tratado no início da função
+  const descricaoForExtraction = row['Descrição'];
+  if (descricaoForExtraction) {
+    const descricaoStr = String(descricaoForExtraction).trim();
     
     // Padrões para extrair nome do operador da descrição:
     // - "ARMADO PELO USUARIO  - SRA. JOSEFÁ" -> "JOSEFÁ"
@@ -514,9 +523,33 @@ export function processDeterministic(rawData: ExcelRow[]): ProcessedRow[] {
   }
   
   // 3. Processar cada filial e cada dia
+  // IMPORTANTE: Ordenar filiais - numéricas primeiro, depois textuais (alfabeticamente)
+  const sortedFilials = Array.from(filialDateRanges.entries()).sort((a, b) => {
+    const filialA = a[0];
+    const filialB = b[0];
+    
+    // Verificar se são numéricas (apenas dígitos)
+    const isNumericA = /^\d+$/.test(filialA);
+    const isNumericB = /^\d+$/.test(filialB);
+    
+    // Filiais numéricas vêm primeiro
+    if (isNumericA && !isNumericB) return -1;
+    if (!isNumericA && isNumericB) return 1;
+    
+    // Se ambas são numéricas, ordenar numericamente
+    if (isNumericA && isNumericB) {
+      const numA = parseInt(filialA);
+      const numB = parseInt(filialB);
+      return numA - numB;
+    }
+    
+    // Se ambas são textuais, ordenar alfabeticamente
+    return filialA.localeCompare(filialB);
+  });
+  
   const processedRows: ProcessedRow[] = [];
   
-  for (const [filial, range] of filialDateRanges.entries()) {
+  for (const [filial, range] of sortedFilials) {
     const filialEvents = events.filter(e => e.filial === filial);
     // Armazenar operadores do dia anterior para usar em dias faltantes
     let prevAberturaOperador: string | null = null;
@@ -820,8 +853,48 @@ export function processDeterministic(rawData: ExcelRow[]): ProcessedRow[] {
   // 4. Garantir unicidade de horários
   const finalRows = ensureUniqueTimestamps(processedRows);
   
-  console.log(`✅ Total de linhas processadas: ${finalRows.length}`);
+  // 5. Ordenar registros finais: numéricas primeiro, textuais no final, depois por data
+  const sortedFinalRows = finalRows.sort((a, b) => {
+    const filialA = a.FILIAL;
+    const filialB = b.FILIAL;
+    
+    // Verificar se são numéricas (apenas dígitos)
+    const isNumericA = /^\d+$/.test(filialA);
+    const isNumericB = /^\d+$/.test(filialB);
+    
+    // Filiais numéricas vêm primeiro
+    if (isNumericA && !isNumericB) return -1;
+    if (!isNumericA && isNumericB) return 1;
+    
+    // Se ambas são numéricas, ordenar numericamente
+    if (isNumericA && isNumericB) {
+      const numA = parseInt(filialA);
+      const numB = parseInt(filialB);
+      
+      if (numA !== numB) {
+        return numA - numB;
+      }
+    } else {
+      // Se ambas são textuais, ordenar alfabeticamente
+      const textCompare = filialA.localeCompare(filialB);
+      if (textCompare !== 0) {
+        return textCompare;
+      }
+    }
+    
+    // Se mesma filial, ordenar por data de ABERTURA
+    const dateA = parseTimestamp(a.ABERTURA);
+    const dateB = parseTimestamp(b.ABERTURA);
+    
+    if (!dateA || !dateB) {
+      return 0; // Manter ordem se não conseguir parsear
+    }
+    
+    return dateA.getTime() - dateB.getTime();
+  });
   
-  return finalRows;
+  console.log(`✅ Total de linhas processadas: ${sortedFinalRows.length}`);
+  
+  return sortedFinalRows;
 }
 
