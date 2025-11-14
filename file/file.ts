@@ -151,7 +151,7 @@ export const upload = api(
         fileSize: fileSize,
         recordsCount: rawData.length,
         customPrompt: req.prompt,
-        modelUsed: 'llama-3.3-70b-versatile',
+        modelUsed: req.useDeterministic ? 'Processamento Determinístico' : 'llama-3.3-70b-versatile',
       });
 
       if (createdHistoryId) {

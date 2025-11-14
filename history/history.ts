@@ -53,6 +53,18 @@ interface StatsResponse {
 }
 
 /**
+ * Delete History Request/Response
+ */
+interface DeleteHistoryRequest {
+  id: string;
+}
+
+interface DeleteHistoryResponse {
+  success: boolean;
+  message: string;
+}
+
+/**
  * Create History Input
  */
 export interface CreateHistoryInput {
@@ -315,4 +327,59 @@ export async function updateHistory(input: UpdateHistoryInput): Promise<void> {
 
   console.log(`✅ Histórico atualizado: ${input.id} (${input.status})`);
 }
+
+/**
+ * API: Delete processing history record
+ * DELETE /history/:id
+ */
+export const deleteHistory = api(
+  {
+    method: "DELETE",
+    path: "/history/:id",
+    expose: true,
+  },
+  async (req: DeleteHistoryRequest): Promise<DeleteHistoryResponse> => {
+    if (!req.id) {
+      throw APIError.invalidArgument("ID do histórico não fornecido");
+    }
+
+    try {
+      // Verificar se o registro existe
+      let exists = false;
+      for await (const row of db.query<{ count: number }>`
+        SELECT COUNT(*) as count
+        FROM processing_history
+        WHERE id = ${req.id}
+      `) {
+        exists = row.count > 0;
+        break;
+      }
+
+      if (!exists) {
+        throw APIError.notFound("Registro de histórico não encontrado");
+      }
+
+      // Deletar o registro
+      await db.exec`
+        DELETE FROM processing_history
+        WHERE id = ${req.id}
+      `;
+
+      console.log(`🗑️ Histórico deletado: ${req.id}`);
+
+      return {
+        success: true,
+        message: "Registro deletado com sucesso",
+      };
+    } catch (error) {
+      if (error instanceof APIError) {
+        throw error;
+      }
+      console.error("❌ Erro ao deletar histórico:", error);
+      throw APIError.internal(
+        error instanceof Error ? error.message : "Erro ao deletar registro"
+      );
+    }
+  }
+);
 
