@@ -1,15 +1,17 @@
 /**
  * Processador Determinístico de Planilhas de Arme/Desarme
  * 
- * Implementa as regras de negócio definidas no plano do ChatGPT:
+ * REGRAS DE NEGÓCIO:
  * - ABERTURA: primeiro DESARME do dia, entre 05:30-08:30
  * - FECHAMENTO: último ARME do dia, entre 22:30-01:30 (dia seguinte)
- * - Horários fora do intervalo: gerar aleatório dentro do intervalo
- * - Dias faltantes: criar dia artificial com horários aleatórios
- * - Operador faltante: repetir operador do dia anterior
- * - Garantir unicidade: horários nunca se repetem (hora, minuto, segundo)
  * 
- * Baseado no código Python fornecido no chatgpt-view.txt
+ * REGRA PRINCIPAL: Preservar horários originais quando dentro do intervalo esperado
+ * - Horários dentro do intervalo: MANTER ORIGINAL (não alterar)
+ * - Horários fora do intervalo: AJUSTAR para dentro do intervalo
+ * - Dias faltantes: CRIAR horário artificial dentro do intervalo
+ * 
+ * Operador faltante: repetir operador do dia anterior
+ * Garantir unicidade: horários nunca se repetem (hora, minuto, segundo)
  */
 
 import { ExcelRow } from '../shared/types';
@@ -442,11 +444,6 @@ function parseTimestamp(dataRecebimento: any): Date | null {
   // Tentar parsear como ISO string ou formato mm/dd/yy
   const isoDate = new Date(str);
   if (!isNaN(isoDate.getTime())) {
-    // Se parseou mas perdeu horário (virou 00:00:00), é porque a string não tinha horário
-    // Neste caso, é melhor retornar null para podermos debugar
-    if (isoDate.getHours() === 0 && isoDate.getMinutes() === 0 && isoDate.getSeconds() === 0) {
-      console.log(`⚠️ Data parseada sem horário: "${str}" -> ${formatDateTime(isoDate)}`);
-    }
     return isoDate;
   }
   
@@ -477,6 +474,9 @@ function getDateOnly(date: Date): Date {
 /**
  * Garante que horários não se repetem
  * IMPORTANTE: Preserva TODOS os campos do row, incluindo operadores
+ * 
+ * REGRA: Só ajusta horários quando há conflito real (duplicação)
+ * Preserva horários originais sempre que possível
  */
 function ensureUniqueTimestamps(rows: ProcessedRow[]): ProcessedRow[] {
   const seen = new Set<string>();
@@ -487,21 +487,33 @@ function ensureUniqueTimestamps(rows: ProcessedRow[]): ProcessedRow[] {
     
     if (!abertura || !fechamento) return row;
     
-    // Normalizar para segundo
+    // Normalizar para segundo (remover milissegundos)
     abertura = new Date(abertura.getFullYear(), abertura.getMonth(), abertura.getDate(),
       abertura.getHours(), abertura.getMinutes(), abertura.getSeconds());
     fechamento = new Date(fechamento.getFullYear(), fechamento.getMonth(), fechamento.getDate(),
       fechamento.getHours(), fechamento.getMinutes(), fechamento.getSeconds());
     
-    // Ajustar abertura se colidir
-    while (seen.has(abertura.toISOString())) {
-      abertura = new Date(abertura.getTime() + 1000); // +1 segundo
+    const aberturaKey = abertura.toISOString();
+    const fechamentoKey = fechamento.toISOString();
+    
+    // Ajustar abertura APENAS se houver conflito (duplicação)
+    // Preservar horário original quando possível
+    if (seen.has(aberturaKey)) {
+      // Conflito detectado: ajustar mínimo necessário (+1 segundo)
+      while (seen.has(abertura.toISOString())) {
+        abertura = new Date(abertura.getTime() + 1000);
+      }
     }
     seen.add(abertura.toISOString());
     
-    // Ajustar fechamento se colidir
-    while (seen.has(fechamento.toISOString()) || fechamento.getTime() === abertura.getTime()) {
-      fechamento = new Date(fechamento.getTime() + 1000); // +1 segundo
+    // Ajustar fechamento APENAS se houver conflito (duplicação ou igual à abertura)
+    // Preservar horário original quando possível
+    const fechamentoFinalKey = fechamento.toISOString();
+    if (seen.has(fechamentoFinalKey) || fechamento.getTime() === abertura.getTime()) {
+      // Conflito detectado: ajustar mínimo necessário (+1 segundo)
+      while (seen.has(fechamento.toISOString()) || fechamento.getTime() === abertura.getTime()) {
+        fechamento = new Date(fechamento.getTime() + 1000);
+      }
     }
     seen.add(fechamento.toISOString());
     
@@ -525,36 +537,6 @@ function ensureUniqueTimestamps(rows: ProcessedRow[]): ProcessedRow[] {
  * @returns Array de linhas processadas
  */
 export function processDeterministic(rawData: ExcelRow[], uf: string = 'SE'): ProcessedRow[] {
-  // Debug: Verificar estrutura dos dados
-  if (rawData.length > 0) {
-    const firstRow = rawData[0];
-    const keys = Object.keys(firstRow);
-    console.log('🔍 Colunas disponíveis no Excel:', keys);
-    console.log('🔍 Primeira linha de exemplo:', JSON.stringify(firstRow, null, 2));
-    
-    // Debug CRÍTICO: Verificar tipo do timestamp
-    const dataRecebimento = firstRow['Data de recebimento'];
-    console.log('🔍 DEBUG TIMESTAMP - Tipo do campo "Data de recebimento":',{
-      valor: dataRecebimento,
-      tipo: typeof dataRecebimento,
-      isDate: dataRecebimento instanceof Date,
-      constructor: dataRecebimento?.constructor?.name,
-    });
-    
-    // Testar primeiras 5 linhas
-    console.log('🔍 DEBUG TIMESTAMPS - Primeiras 5 linhas:');
-    for (let i = 0; i < Math.min(5, rawData.length); i++) {
-      const row = rawData[i];
-      const dt = row['Data de recebimento'];
-      console.log(`  Linha ${i + 1}:`, {
-        valor: dt,
-        tipo: typeof dt,
-        isDate: dt instanceof Date,
-        formatted: dt instanceof Date ? formatDateTime(dt) : String(dt),
-      });
-    }
-  }
-  
   // 1. Classificar e normalizar eventos
   const events: ClassifiedEvent[] = [];
   
@@ -580,11 +562,6 @@ export function processDeterministic(rawData: ExcelRow[], uf: string = 'SE'): Pr
       filial,
       date,
     });
-  }
-  
-  console.log(`✅ Total de eventos processados: ${events.length}`);
-  if (events.length > 0) {
-    console.log('🔍 Primeiro evento:', events[0]);
   }
   
   // 2. Agrupar por filial e determinar range de datas
@@ -686,27 +663,6 @@ export function processDeterministic(rawData: ExcelRow[], uf: string = 'SE'): Pr
       // PRIORIDADE: Usar ARME do dia atual se existir, senão usar do dia seguinte
       const armes = armesDay.length > 0 ? armesDay : armesNextDay;
       
-      // Log detalhado dos ARMEs encontrados
-      if (armes.length > 0) {
-        console.log(`🔍 ARMEs ENCONTRADOS - Filial ${filial}, Data ${dateKey.toISOString().split('T')[0]}:`, {
-          totalArmesDisponíveis: armes.length,
-          fonte: armesDay.length > 0 ? 'mesmo dia' : 'dia seguinte',
-          armesDetalhados: armes.slice(0, 3).map(a => ({
-            timestamp: formatDateTime(a.timestamp),
-            hora: a.timestamp.getHours(),
-            minuto: a.timestamp.getMinutes(),
-            dataEvento: getDateOnly(a.timestamp).toISOString().split('T')[0],
-            operador: a.operador,
-          })),
-          selecionado: {
-            timestamp: formatDateTime(armes[0].timestamp),
-            hora: armes[0].timestamp.getHours(),
-            minuto: armes[0].timestamp.getMinutes(),
-            operador: armes[0].operador,
-          },
-        });
-      }
-      
       let abertura: Date;
       let aberturaOperador: string;
       let fechamento: Date;
@@ -715,13 +671,17 @@ export function processDeterministic(rawData: ExcelRow[], uf: string = 'SE'): Pr
       // Processar ABERTURA
       if (desarmes.length > 0) {
         const firstDesarme = desarmes[0];
-        abertura = new Date(firstDesarme.timestamp);
+        const timestampOriginal = new Date(firstDesarme.timestamp);
         // Usar nome do operador (já limpo pela função getOperadorOriginal)
         aberturaOperador = firstDesarme.operador || '';
         
-        
-        // Se horário fora da janela, ajustar
-        if (!isInOpenWindow(abertura)) {
+        // REGRA: Se horário está dentro da janela esperada (05:30-08:30), MANTER ORIGINAL
+        // Só ajustar se estiver FORA da janela
+        if (isInOpenWindow(timestampOriginal)) {
+          // Horário dentro da regra: preservar original
+          abertura = timestampOriginal;
+        } else {
+          // Horário fora da janela: ajustar para dentro do intervalo
           const seedKey = `OPEN-${filial}-${dateKey.toISOString().split('T')[0]}`;
           const randomTime = randomTimeBetween(
             seedKey,
@@ -798,21 +758,13 @@ export function processDeterministic(rawData: ExcelRow[], uf: string = 'SE'): Pr
           dentroJanela = hour === 22 && minute >= 30 || hour === 23;
         }
         
-        console.log(`🔍 VALIDAÇÃO FECHAMENTO - Filial ${filial}, Data ${dateKey.toISOString().split('T')[0]}:`, {
-          timestampOriginal: formatDateTime(timestampOriginal),
-          hora: hour,
-          minuto: minute,
-          isDiaSeguinte: isDiaSeguinte,
-          dataEvento: fechamentoDate.toISOString().split('T')[0],
-          dataProcessando: dateKey.toISOString().split('T')[0],
-          dentroJanela: dentroJanela,
-          janelaEsperada: isDiaSeguinte ? '00:00-01:30 (dia seguinte)' : '22:30-23:59 (mesmo dia)',
-        });
-        
-        // Se horário fora da janela, ajustar
-        if (!dentroJanela) {
-          console.log(`⚠️ FECHAMENTO FORA DA JANELA - Ajustando...`);
-          
+        // REGRA: Se horário está dentro da janela esperada, MANTER ORIGINAL
+        // Só ajustar se estiver FORA da janela
+        if (dentroJanela) {
+          // Horário dentro da regra: preservar original (não alterar)
+          fechamento = timestampOriginal;
+        } else {
+          // Horário fora da janela: ajustar para dentro do intervalo
           const seedKey = `CLOSE-${filial}-${dateKey.toISOString().split('T')[0]}`;
           const randomTime = randomTimeBetween(
             seedKey,
@@ -832,7 +784,6 @@ export function processDeterministic(rawData: ExcelRow[], uf: string = 'SE'): Pr
               randomTime.minute,
               randomTime.second
             );
-            console.log(`✅ FECHAMENTO AJUSTADO (dia seguinte): ${formatDateTime(fechamento)}`);
           } else {
             fechamento = new Date(
               dateKey.getFullYear(),
@@ -842,10 +793,7 @@ export function processDeterministic(rawData: ExcelRow[], uf: string = 'SE'): Pr
               randomTime.minute,
               randomTime.second
             );
-            console.log(`✅ FECHAMENTO AJUSTADO (mesmo dia): ${formatDateTime(fechamento)}`);
           }
-        } else {
-          console.log(`✅ FECHAMENTO MANTIDO (dentro da janela): ${formatDateTime(fechamento)}`);
         }
       } else {
         // Dia faltando - criar artificialmente usando operador do dia anterior da mesma filial
@@ -973,8 +921,6 @@ export function processDeterministic(rawData: ExcelRow[], uf: string = 'SE'): Pr
     
     return dateA.getTime() - dateB.getTime();
   });
-  
-  console.log(`✅ Total de linhas processadas: ${sortedFinalRows.length}`);
   
   return sortedFinalRows;
 }
